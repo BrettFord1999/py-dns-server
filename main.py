@@ -1,5 +1,14 @@
 import socket
+import sys
 # dig @127.0.0.1 -p 2053 +noedns codecrafters.io
+
+#gets local IP of interface that can route to internet
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    local_ip = s.getsockname()[0]
+    s.close()
+    return local_ip
 
 class dns_header:
     def __init__(self, id, qr=0, opcode=0, aa=0, tc=0, rd=1, ra=0, z=0, rcode=0, qdcount=1, ancount=0, nscount=0, arcount=0):
@@ -57,6 +66,7 @@ class question:
             self.record_type.to_bytes(2, byteorder='big')+
             self.dns_class.to_bytes(2, byteorder='big')
         )
+        print(f"QUESTION PACKET TYPE: {type(question_packet)}")
         
         return question_packet , domain_question_name
 
@@ -127,146 +137,182 @@ def question_parser(recvd_bytes, qdcount):
 
 
     for q in range(qdcount):
-        
+
+        #loop over each part of the question until it hits a terminator byte 0x00, append the label and a period . to a string to create the full domain name
+        full_domain = []
+        offset = 0
+
+        while question_bytes[offset] != 0x00:
+            label_length = question_bytes[offset]
+            offset += 1
+            label = question_bytes[offset:offset+label_length].decode('utf-8')
+            full_domain.append(label)
+            offset += label_length
+        full_domain = ".".join(full_domain)
+
         termination_index = question_bytes.index(0x00)
 
         question = question_bytes[:termination_index]
 
-        domain_name_length = question[0]
+    #     domain_name_length = question[0]
         
-        domain_name = question[1:1+domain_name_length].decode('utf-8')
+    #     domain_name = question[1:1+domain_name_length].decode('utf-8')
         
-        top_domain_length = question[1+domain_name_length] 
+    #     top_domain_length = question[1+domain_name_length] 
         
-        top_domain = question[2+domain_name_length:2+domain_name_length+top_domain_length].decode('utf-8')
+    #     top_domain = question[2+domain_name_length:2+domain_name_length+top_domain_length].decode('utf-8')
 
         record_type = int.from_bytes(question_bytes[termination_index+1:termination_index+3], "big")
         dns_class   = int.from_bytes(question_bytes[termination_index+3:termination_index+5], "big")
-        full_domain = domain_name + "." + top_domain
 
-        #logging/debugging prints
-        #print(type(domain_name), type(top_domain))
-        #print(f"domain: {domain_name} (Length: {domain_name_length})")
-        #print(f"top domain: {top_domain} (Length: {top_domain_length})")
-        #print(f"{recvd_bytes[12:].decode('utf-8')}")
+
+
+
         print("++++++++ QUESTION PARSER FUNCTION +++++++++")
         print(f"question: {question}")
-        print(f"domain length = {domain_name_length}")
         print(f"full domain: {full_domain}, record_type = {record_type}, dns_class = {dns_class}")
         print(f"termination index: {termination_index}")
+
 
         
 
         question_values.append({
-            'domain'     : domain_name,
-            'top_domain' : top_domain,
             'full_domain': full_domain,
             'record_type': record_type,
-            'dns_class'  : dns_class
+            'dns_class'  : dns_class,
         })
 
     return question_values
 
 
 
-# test_header = dns_header(
-#     id=1234,
-#     qr=1,
-#     opcode=0,
-#     aa=0,
-#     tc=0,
-#     rd=0,
-#     ra=0,
-#     z=0,
-#     rcode=0,
-#     qdcount=1,
-#     ancount=1,
-#     nscount=0,
-#     arcount=0
-# )
-
-#test_question = question(domain="codecrafters.io", record_type=1, dns_class=1)
-#test_answer   = answer(domain=test_question.to_packet()[1], record_type=1, dns_class=1, ttl=60, rdlength=4, data='8.8.8.8')
-
-
 
 #create our socket object, loop to await incoming packets with a max size of 512 bytes
 def main():
+    if '--resolver' in sys.argv:
+        resolver_index = sys.argv.index("--resolver")
+
+        try:
+            resolver_address = sys.argv[resolver_index + 1]
+            resolver_address = resolver_address.split(":")
+            resolver = (resolver_address[0],int(resolver_address[1]))
+            print(f"RESOLVER ==========  {resolver}")
+        except IndexError:
+            print("No value provided for --resolver")
+
+
+    #change the socket to bind to ip variable on real server, need to be 127.0.0.1 to pass test though
+    #ip = get_local_ip() ; #print(ip)
 
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    udp_socket.bind(("127.0.0.1", 2053))
+    udp_socket.bind(('127.0.0.1', 2053))
     
     while True:
         try:
+            #recieve requests: 
             buf, source = udp_socket.recvfrom(512)
-            #print(source)
-
-            #header creation
+            
+            #parse and create our header object
             id, qr, opcode, aa, tc, rd, ra, z, rcode, qdcount, ancount, nscount, arcount = header_parser(buf)
-            header_response = dns_header(
-                id=id,
-                qr=1,
-                opcode=opcode,
-                aa=aa,
-                tc=tc,
-                rd=rd,
-                ra=ra,
-                z=z,
-                rcode=4,
-                qdcount=qdcount,
-                ancount=qdcount,
-                nscount=nscount,
-                arcount=arcount
-            )
+            header_response = dns_header(id=id , qr=0 , opcode=opcode , aa=aa , tc=tc , rd=rd , ra=ra , z=z , rcode=4 , qdcount=1 , ancount=ancount , nscount=nscount , arcount=arcount)
+
             #question parsing then pass into our question header initializer
             question_values = question_parser(buf, qdcount)
             question_objects_array = []
-
             for q in range(qdcount):
-                question_objects_array.append(question(domain=question_values[q]['full_domain'], \
-                                                       record_type=question_values[q]['record_type'], \
-                                                       dns_class=question_values[q]['dns_class']))
-            print("+++++++++ Creating question headers +++++++++++ \
-                  Question Values being passed into question class within loop to create question object arrays")
-            print(question_values[0]['full_domain'])
-            print(question_values[0]['record_type'])
-            print(question_values[0]['dns_class'])
+                print(f"looping to create question object array: {q}")
+                question_objects_array.append(question(domain=question_values[q]['full_domain'] , record_type=question_values[q]['record_type'] , dns_class=question_values[q]['dns_class']))
+            print(f"Question object array: {question_objects_array}")
+
+            response_array = []
+            for object in question_objects_array:
+                response_packet = header_response.to_packet() + object.to_packet()[0]
+
+                response_array.append(response_packet)
+
+            print(f"RESPONSE ARRAY: {response_array} RESPONSE ARRAY LENGTH: {len(response_array)}")
 
 
-            question_response = b''
-            for q in question_objects_array:
-                packet_output = q.to_packet()[0]
-                question_response += packet_output
-            print(f"question packet built {question_response}")
-
-            #answer creation with object initialization
-            answer_objects_array = []
-            for q in range(qdcount):
-                answer_objects_array.append(answer( domain      =question_objects_array[q].to_packet()[1], \
-                                                    record_type =question_values[q]['record_type'], \
-                                                    dns_class   =question_values[q]['dns_class']  , \
-                                                    ttl=60, \
-                                                    rdlength=4, \
-                                                    data='8.8.8.8'))
-
-            #answer_response = b''.join([a.to_packet() for a in answer_objects_array])
-
-            print(type(answer_objects_array[0].to_packet()))
-            answer_response = b''
-            for a in answer_objects_array:
-                packet_output = a.to_packet()
-                answer_response += packet_output
-            print(f"answer packet built {answer_response}")
-            
-            #answer_response = answer(domain= question_response, record_type=record_type, dns_class=dns_class, ttl=60, rdlength=4, data='8.8.8.8')
 
 
-            response = header_response.to_packet() + question_response + answer_response
-    
-            udp_socket.sendto(response, source)
+            if resolver:
+                resolver_results_array = []
+                for r in range(len(response_array)):
+                    
+                    print(f"index {r}")
+                    udp_socket.settimeout(5)
+                    print(f"sending question {response_array[r]} to resolver {resolver}")
+                    udp_socket.sendto(response_array[r],resolver)
+                    buf_resolver, _ = udp_socket.recvfrom(512)
+                    
+
+
+                    resolver_results_array.append(buf_resolver)
+                print(len(resolver_results_array))
+                print(resolver_results_array)
+
+                if (len(resolver_results_array) <= 1 ):
+                    print('only one question forwarding packet back to source')
+                    udp_socket.sendto(buf_resolver, source)
+                    
+                else:
+                    print('more than one question concatenating answers and responding')
+
+                    
+                    id, qr, opcode, aa, tc, rd, ra, z, rcode, qdcount, ancount, nscount, arcount = header_parser(buf_resolver)
+                    header_response = dns_header(id=id , qr=1 , opcode=opcode , aa=aa , tc=tc , rd=rd , ra=ra , z=z , rcode=4 , qdcount=len(resolver_results_array) , ancount=len(resolver_results_array) , nscount=nscount , arcount=arcount)
+
+                
+
+
+
+
+            # else:
+                
+            #     question_response = b''
+            #     for q in question_objects_array:
+            #         packet_output = q.to_packet()[0]
+            #         question_response += packet_output
+            #     print(f"question packet built {question_response}")
+
+            #     #answer creation with object initialization
+            #     answer_objects_array = []
+            #     for q in range(qdcount):
+            #         answer_objects_array.append(answer( domain      =question_objects_array[q].to_packet()[1], \
+            #                                             record_type =question_values[q]['record_type'], \
+            #                                             dns_class   =question_values[q]['dns_class']  , \
+            #                                             ttl=60, \
+            #                                             rdlength=4, \
+            #                                             data='0.0.0.0'))
+
+            #    ## #answer_response = b''.join([a.to_packet() for a in answer_objects_array])
+
+            #     print(type(answer_objects_array[0].to_packet()))
+            #     answer_response = b''
+            #     for a in answer_objects_array:
+            #         packet_output = a.to_packet()
+            #         answer_response += packet_output
+            #     print(f"answer packet built {answer_response}")
+                
+                
+
+
+            #     response = header_response.to_packet() + question_response + answer_response
+            #     print(f"SOURCE: {source} port type{type(source[1])}")
+            #     #udp_socket.sendto(response, source)
+            #     udp_socket.sendto(response, source)
         except Exception as e:
             print(f"Error receiving data: {e}")
             break
 
 if __name__ == "__main__":
     main()
+
+
+
+#finish packet splitting for forwarding
+#logic for types A, Cname, MX
+# backend DB for lookup and storing IPs
+#if it can't be resolved forward
+
+
